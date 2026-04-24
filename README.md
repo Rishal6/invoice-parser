@@ -2,7 +2,7 @@
 
 AI-powered invoice extraction system built on **AWS Bedrock + Strands Agents**. Extracts every line item from PDF invoices with LLM-verifies-LLM architecture, mandatory worker verification, and a self-improving feedback loop.
 
-**Live URL:** (populated after deployment)
+**Live URL:** http://invoice-parser-alb-1825491280.us-east-1.elb.amazonaws.com
 
 ## Architecture
 

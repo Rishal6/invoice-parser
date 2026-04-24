@@ -238,7 +238,7 @@ Resources:
       ServiceName: invoice-parser
       Cluster: !Ref ECSCluster
       TaskDefinition: !Ref TaskDefinition
-      DesiredCount: 1
+      DesiredCount: 0
       LaunchType: FARGATE
       NetworkConfiguration:
         AwsvpcConfiguration:

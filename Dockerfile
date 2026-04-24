@@ -1,7 +1,7 @@
 # =============================================================================
 # Stage 1: Builder — install Python dependencies
 # =============================================================================
-FROM python:3.11-slim AS builder
+FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
 WORKDIR /build
 
@@ -26,7 +26,7 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements-deploy.txt
 # =============================================================================
 # Stage 2: Runtime — lean image with only what we need
 # =============================================================================
-FROM python:3.11-slim AS runtime
+FROM public.ecr.aws/docker/library/python:3.11-slim AS runtime
 
 # System deps (poppler for pdf2image, curl for healthcheck)
 RUN apt-get update && \
