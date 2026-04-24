@@ -1,0 +1,28 @@
+# Python caches
+__pycache__
+*.pyc
+.pytest_cache
+
+# Version control
+.git
+
+# Test files
+test_*
+
+# Runtime data (not baked into image)
+data/traces/
+data/verifications/
+data/feedback_log.json
+data/metrics.json
+data/patterns.json
+data/templates/
+
+# IDE / OS
+.vscode
+.idea
+*.swp
+.DS_Store
+
+# Build artifacts
+*.zip
+*.egg-info
