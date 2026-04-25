@@ -14,6 +14,7 @@ fastapi
 uvicorn
 pymupdf
 pypdf
+Pillow
 rapidfuzz
 strands-agents
 python-multipart

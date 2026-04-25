@@ -368,10 +368,11 @@ def _render_page_strips(pdf_path: str, page_index: int, strips_per_page: int = 5
         clip = pymupdf.Rect(0, y0, rect.width, y1)
         pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), clip=clip)
 
+        png_bytes = pix.tobytes("png")
         strips.append({
             "image": {
                 "format": "png",
-                "source": {"bytes": pix.tobytes("png")},
+                "source": {"bytes": png_bytes},
             }
         })
 
@@ -540,10 +541,14 @@ def extract_chunk(chunk_index: int) -> str:
 
     model_id = accumulator.chunk_model_used.get(chunk_index, EXTRACT_MODEL_PRIMARY)
 
+    chunk_reader = PdfReader(chunk_path)
+    chunk_pages = len(chunk_reader.pages)
+
+    # ─── LLM EXTRACTION ──────────────────────────────────────
     try:
         if use_vision:
             image_blocks = _render_pdf_to_images(chunk_path)
-            user_content = [{"text": prompt}] + image_blocks
+            user_content = [{"text": f"{prompt}\n\nExtract all data from this invoice."}] + image_blocks
         else:
             user_content = [{"text": f"{prompt}\n\nINVOICE TEXT:\n{source_text}"}]
 
@@ -567,10 +572,6 @@ def extract_chunk(chunk_index: int) -> str:
             'FreightTerms', 'IncoTerms', 'TermsOfPayment', 'Exporter', 'Importer',
         ]
         accumulator.invoice_header = {k: parsed.get(k) for k in header_fields if parsed.get(k) is not None}
-
-    # Handle truncation: re-extract using strip-based image chunking
-    chunk_reader = PdfReader(chunk_path)
-    chunk_pages = len(chunk_reader.pages)
 
     if truncated and chunk_pages >= 1:
         logger.info(f"[TOOL] chunk {chunk_index}: TRUNCATED — using strip-based extraction ({chunk_pages} pages)")
@@ -785,10 +786,9 @@ def review_chunk(chunk_index: int) -> str:
 
     retries = accumulator.chunk_retry_count.get(chunk_index, 0)
 
-    # Soft pass: score >= 0.6 and item count matches — good enough for messy/scanned invoices
-    soft_pass = (score >= 0.6 and extracted == expected and not any(
-        i.get('type') == 'MISSING_ITEM' for i in critical_issues
-    ))
+    # Soft pass for scanned/vision docs: more lenient since OCR is inherently noisy
+    missing_items = [i for i in critical_issues if i.get('type') == 'MISSING_ITEM']
+    soft_pass = (score >= 0.6 and extracted == expected and not missing_items)
 
     if passed or soft_pass:
         label = "PASSED" if passed else "SOFT-PASSED"

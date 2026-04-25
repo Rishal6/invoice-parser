@@ -106,6 +106,13 @@ class ExtractionResult(BaseModel):
     error: Optional[str] = None
 
 
+class JobProgress(BaseModel):
+    items_found: int = 0
+    chunks_done: int = 0
+    total_chunks: int = 0
+    current_phase: str = ""
+
+
 class JobStatus(BaseModel):
     job_id: str
     status: JobState = JobState.PENDING
@@ -113,6 +120,7 @@ class JobStatus(BaseModel):
     created_at: float = 0.0
     completed_at: Optional[float] = None
     result: Optional[ExtractionResult] = None
+    progress: Optional[JobProgress] = None
 
 
 class ParseResponse(BaseModel):
@@ -351,13 +359,31 @@ function startPolling(jobId) {
       const job = await res.json();
 
       if (job.status === 'PROCESSING') {
-        fill.style.width = '60%';
-        txt.textContent = 'Extracting' + '.'.repeat(dots + 1);
+        const p = job.progress;
+        if (p && p.total_chunks > 0) {
+          const pct = Math.min(85, 20 + Math.round((p.chunks_done / p.total_chunks) * 60));
+          fill.style.width = pct + '%';
+          let msg = p.current_phase;
+          if (p.current_phase === 'Extracting') {
+            msg = p.items_found > 0
+              ? p.items_found + ' items found (' + p.chunks_done + '/' + p.total_chunks + ' chunks)'
+              : 'Extracting chunk ' + (p.chunks_done + 1) + ' of ' + p.total_chunks;
+          } else if (p.current_phase === 'Finalizing') {
+            msg = p.items_found + ' items found — deduplicating & verifying';
+          }
+          txt.textContent = msg + '.'.repeat(dots + 1);
+        } else {
+          fill.style.width = '25%';
+          txt.textContent = 'Analyzing document' + '.'.repeat(dots + 1);
+        }
       } else if (job.status === 'AWAITING_VERIFICATION') {
         clearInterval(pollTimer);
-        fill.style.width = '90%';
-        fill.style.background = '#d69e2e';
-        txt.innerHTML = 'Extraction done — <a href="/verify/ui/' + jobId + '" style="color:#ff9900;font-weight:600">Open Verification</a>';
+        fill.style.width = '100%';
+        fill.style.background = '#38a169';
+        const items = job.result ? (job.result.total_items || job.result.LineItems?.length || 0) : 0;
+        const score = job.result?.quality_score ? (job.result.quality_score * 100).toFixed(0) + '% quality' : '';
+        const summary = items > 0 ? items + ' items extracted' + (score ? ' · ' + score : '') : 'Extraction complete';
+        txt.innerHTML = summary + ' — <a href="/verify/ui/' + jobId + '" style="color:#fff;font-weight:600;text-decoration:underline">Review & Verify</a>';
         if (job.result) {
           currentData = job.result;
           currentItems = job.result.LineItems || [];
@@ -366,7 +392,9 @@ function startPolling(jobId) {
       } else if (job.status === 'COMPLETED') {
         clearInterval(pollTimer);
         fill.style.width = '100%';
-        txt.textContent = 'Done!';
+        fill.style.background = '#38a169';
+        const items = job.result ? (job.result.total_items || job.result.LineItems?.length || 0) : 0;
+        txt.textContent = items > 0 ? items + ' items extracted — verified!' : 'Done!';
         document.getElementById('uploadProgress').style.display = 'none';
         if (job.result) {
           currentData = job.result;
@@ -707,7 +735,28 @@ async def get_job(job_id: str):
     """Get the status of an extraction job."""
     if job_id not in jobs:
         raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-    return jobs[job_id]
+    job = jobs[job_id]
+    if job.status == JobState.PROCESSING:
+        import tools
+        acc = tools.accumulator
+        chunks_done = len(acc.processed_indices)
+        total = acc.total_chunks
+        items = len(acc.items)
+        if total > 0 and chunks_done >= total:
+            phase = "Finalizing"
+        elif chunks_done > 0:
+            phase = "Extracting"
+        elif total > 0:
+            phase = "Splitting"
+        else:
+            phase = "Starting"
+        job.progress = JobProgress(
+            items_found=items,
+            chunks_done=chunks_done,
+            total_chunks=total,
+            current_phase=phase,
+        )
+    return job
 
 
 @app.get("/result/{job_id}")
