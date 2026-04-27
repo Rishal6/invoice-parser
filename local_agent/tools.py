@@ -1438,6 +1438,24 @@ def verify_final() -> str:
             threading.Thread(target=_bg_codegen, daemon=True).start()
             logger.info(f"[CODEGEN] Background template generation started for {template_key}")
 
+    # Track verify_final call count for agent reasoning
+    if not hasattr(accumulator, '_verify_count'):
+        accumulator._verify_count = 0
+        accumulator._prev_score = 0.0
+    accumulator._verify_count += 1
+    score_delta = avg_score - accumulator._prev_score
+    accumulator._prev_score = avg_score
+
+    # Classify issues as fixable vs not fixable
+    fixable = []
+    not_fixable = []
+    for iss in issues:
+        iss_lower = iss.lower()
+        if any(kw in iss_lower for kw in ['scanned', 'vision', 'image', 'ocr', 'classification', 'document type']):
+            not_fixable.append(iss)
+        else:
+            fixable.append(iss)
+
     report = (
         f"{'PASS' if passed else 'FAIL'}: Final Verification Report\n"
         f"{'='*50}\n"
@@ -1448,9 +1466,19 @@ def verify_final() -> str:
         f"  Average score:      {avg_score:.2f}\n"
         f"  Dedup:              {accumulator.dedup_summary.get('exact_dupes_removed', 0)} exact + "
         f"{accumulator.dedup_summary.get('fuzzy_dupes_removed', 0)} fuzzy removed\n"
+        f"\n"
+        f"  --- DECISION CONTEXT (for your reasoning) ---\n"
+        f"  verify_final call #: {accumulator._verify_count}\n"
+        f"  Score delta:         {score_delta:+.2f} ({'improving' if score_delta > 0.05 else 'declining' if score_delta < -0.05 else 'stagnant'})\n"
+        f"  Fixable issues:      {len(fixable)}\n"
+        f"  Not fixable issues:  {len(not_fixable)}\n"
     )
+    if fixable:
+        report += f"  Fixable: {'; '.join(fixable[:3])}\n"
+    if not_fixable:
+        report += f"  Not fixable: {'; '.join(not_fixable[:3])}\n"
     if issues:
-        report += f"  Issues: {'; '.join(issues)}\n"
+        report += f"  All issues: {'; '.join(issues)}\n"
 
     return report
 

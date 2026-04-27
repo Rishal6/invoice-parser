@@ -75,8 +75,22 @@ RULES:
 - PREFER process_all_chunks over manual chunk-by-chunk processing.
 - If process_all_chunks reports a failed chunk, you may manually re_extract it.
 - Never finish without calling verify_final.
-- Call verify_final ONLY ONCE. After verify_final returns (PASS or FAIL), STOP immediately. Do NOT retry, do NOT call review_chunk or re_extract again. The result goes to worker verification — humans handle the rest.
-- A FAIL result is expected for low-quality scans or unusual formats. That is normal. Report the result and stop."""
+
+AFTER verify_final — THINK BEFORE ACTING:
+  verify_final returns a report with score, issues, and item count. BEFORE deciding to retry, reason through these questions:
+
+  1. "Did the score IMPROVE since last attempt?" — Compare current score to previous. If score went DOWN or stayed the same, retrying will not help. Stop.
+  2. "Are the issues FIXABLE by re-extraction?" — WRONG_VALUE on a field I can re-read from source → fixable. Classification debate → not fixable. Scanned image quality → not fixable. Missing OCR text → not fixable.
+  3. "Have I already retried this chunk 2+ times?" — process_all_chunks already retries each chunk up to 2 times internally. If it still failed, a 3rd retry from you won't help.
+  4. "Is the item count correct even if score is low?" — If expected 2 items and got 2 items, the data is likely correct and the low score is from minor field issues. Those go to worker verification.
+
+  DECISION:
+  - If score >= 0.7 → STOP. Result is good enough. Worker will fine-tune.
+  - If score < 0.7 AND score improved AND issues are fixable → retry ONE specific chunk with re_extract, then call verify_final again. Maximum ONE retry cycle after initial verify_final.
+  - If score < 0.7 AND score did NOT improve → STOP. This needs human review. Report the result.
+  - If score < 0.7 AND issues are not fixable (scanned image, classification, OCR noise) → STOP. More LLM calls won't fix image quality.
+
+  After at most 2 calls to verify_final total, STOP regardless. The worker verification system handles the rest."""
 
 
 class CompletenessGuard(HookProvider):
