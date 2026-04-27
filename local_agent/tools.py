@@ -112,7 +112,7 @@ EXTRACTION_PROMPT = """You are an expert OCR and data extraction AI specializing
 1. CLASSIFICATION & DOCUMENT SCOPE
 - Classification: First, determine the document type. Provide your conclusion in one short sentence in the "Classification" field.
 - INVOICE TYPES (extract data): Commercial Invoice, Customs Invoice, Proforma Invoice, Tax Invoice, Export Invoice, Consular Invoice, Delivery Note with invoice data. These are ALL valid — extract all fields.
-- NON-INVOICE TYPES (return null): Packing List, Purchase Order, Bill of Lading, Shipping Note (without line items/prices), Receipt, Credit Note, Debit Note.
+- NON-INVOICE TYPES (return null): Packing List, Master Packing List, Purchase Order, Bill of Lading, Shipping Note (without line items/prices), Receipt, Credit Note, Debit Note. If the document title or header says "Packing List" or "Master Packing List", it is NOT an invoice even if it contains quantities and descriptions.
 - Action: If the document is any invoice type listed above, extract all required fields. Only return null fields if the document is a non-invoice type.
 - Multi-Page Rule: For multiple pages, concatenate line items page-wise (Page 1 items, followed by Page 2 items). Maintain the original visual order within each page.
 - Packing List Rule: The image may contain an invoice followed by a packing list. Extract item details ONLY from the invoice section. Ignore all packing list data.
@@ -1310,7 +1310,7 @@ def verify_final() -> str:
     # Classification check
     classification = accumulator.invoice_header.get('Classification', '')
     cl = str(classification).lower()
-    non_invoice_types = ['packing list', 'purchase order', 'bill of lading', 'shipping note', 'credit note', 'debit note']
+    non_invoice_types = ['packing list', 'master packing list', 'purchase order', 'bill of lading', 'shipping note', 'credit note', 'debit note']
     is_non_invoice = any(t in cl for t in non_invoice_types)
     is_invoice = classification and not is_non_invoice
 
