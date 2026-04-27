@@ -32,7 +32,12 @@ from strands import tool
 from knowledge import KnowledgeBase
 from patterns import PatternLibrary
 from registry import TemplateRegistry
-from codegen import generate_extractor
+from codegen import generate_extractor_from_golden
+from evaluation import (
+    evaluate_extraction, evaluate_business_rules, evaluate_math_consistency,
+    evaluate_dedup, evaluate_codegen_output, evaluate_template_health,
+    should_use_kb_context,
+)
 from runner import run_extractor
 from tracer import JobTracer
 from vector_store import VectorStore
@@ -502,7 +507,10 @@ def extract_chunk(chunk_index: int) -> str:
         )
         accumulator.format_key = kb_result['format']
         accumulator.format_confidence = kb_result['confidence']
-        accumulator.kb_context = kb_result['context']
+        if should_use_kb_context(kb_result['confidence']):
+            accumulator.kb_context = kb_result['context']
+        else:
+            accumulator.kb_context = ""
         logger.info(f"[KB] Format: {kb_result['format_name']} (confidence={kb_result['confidence']:.2f})")
 
     # ─── VECTOR STORE: search for similar layout ─────────
@@ -529,31 +537,52 @@ def extract_chunk(chunk_index: int) -> str:
 
     # ─── TEMPLATE REGISTRY: check for saved extractor ────
     template_hit = False
-    if not use_vision and accumulator.format_key != "unknown":
-        saved_code = template_registry.lookup(accumulator.format_key)
-        if saved_code:
-            logger.info(f"[TEMPLATE] Found saved extractor for format: {accumulator.format_key}")
-            try:
-                codegen_result = run_extractor(saved_code, source_text)
-                if codegen_result.get('success') and codegen_result.get('LineItems'):
-                    items = codegen_result['LineItems']
-                    template_hit = True
-                    template_registry.record_success(accumulator.format_key)
-                    logger.info(f"[TEMPLATE] Extractor returned {len(items)} items")
+    # Check by KB format_key first, then by vector store format_id
+    template_keys = []
+    if accumulator.format_key != "unknown":
+        template_keys.append(accumulator.format_key)
+    if accumulator.vector_match and accumulator.vector_match is not False:
+        vec_fmt_id = accumulator.vector_match["entry"].format_id
+        if vec_fmt_id not in template_keys:
+            template_keys.append(vec_fmt_id)
 
-                    # Populate header from codegen result
-                    if not accumulator.invoice_header:
-                        header_fields = [
-                            'Classification', 'InvoiceNo', 'Date', 'InvoiceCurrency',
-                            'FreightTerms', 'IncoTerms', 'TermsOfPayment', 'Exporter', 'Importer',
-                        ]
-                        accumulator.invoice_header = {
-                            k: codegen_result.get(k) for k in header_fields if codegen_result.get(k) is not None
-                        }
-                else:
-                    logger.warning(f"[TEMPLATE] Extractor failed or returned no items, falling back to LLM")
-            except Exception as e:
-                logger.warning(f"[TEMPLATE] Extractor error: {e}, falling back to LLM")
+    saved_code = None
+    matched_template_key = None
+    if not use_vision:
+        for tkey in template_keys:
+            entry = template_registry.entries.get(tkey)
+            if entry:
+                health = evaluate_template_health(entry)
+                if not health.passed:
+                    logger.warning(f"[TEMPLATE] {tkey} failed health check — skipping")
+                    continue
+            saved_code = template_registry.lookup(tkey)
+            if saved_code:
+                matched_template_key = tkey
+                break
+
+    if saved_code:
+        logger.info(f"[TEMPLATE] Found saved extractor for: {matched_template_key}")
+        try:
+            codegen_result = run_extractor(saved_code, source_text)
+            if codegen_result.get('success') and codegen_result.get('LineItems'):
+                items = codegen_result['LineItems']
+                template_hit = True
+                template_registry.record_success(matched_template_key)
+                logger.info(f"[TEMPLATE] Extractor returned {len(items)} items")
+
+                if not accumulator.invoice_header:
+                    header_fields = [
+                        'Classification', 'InvoiceNo', 'Date', 'InvoiceCurrency',
+                        'FreightTerms', 'IncoTerms', 'TermsOfPayment', 'Exporter', 'Importer',
+                    ]
+                    accumulator.invoice_header = {
+                        k: codegen_result.get(k) for k in header_fields if codegen_result.get(k) is not None
+                    }
+            else:
+                logger.warning(f"[TEMPLATE] Extractor failed or returned no items, falling back to LLM")
+        except Exception as e:
+            logger.warning(f"[TEMPLATE] Extractor error: {e}, falling back to LLM")
 
     if template_hit:
         # Skip LLM — use template results directly
@@ -692,41 +721,10 @@ def extract_chunk(chunk_index: int) -> str:
         logger.info(f"[TOOL] chunk {chunk_index}: intra-chunk dedup {pre_dedup_count} → {len(items)} items")
         truncated = False
 
-    # ─── CODEGEN: generate template for structured invoices ──
-    if (not use_vision and not truncated and chunk_index == 0
-            and accumulator.format_key != "unknown"
-            and not template_registry.lookup(accumulator.format_key)
-            and len(items) >= 1):
-        try:
-            # Detect column headers from parsed response
-            column_headers = []
-            if items:
-                column_headers = [k for k in items[0].keys() if not k.startswith('_')]
-
-            codegen_out = generate_extractor(
-                sample_text=source_text,
-                column_headers=column_headers,
-                format_key=accumulator.format_key,
-            )
-            if codegen_out.get('structured') and codegen_out.get('code'):
-                # Validate the generated code runs without error on current text
-                test_result = run_extractor(codegen_out['code'], source_text)
-                if test_result.get('success') and test_result.get('LineItems'):
-                    template_id = codegen_out['template_id'] or accumulator.format_key
-                    template_registry.save(template_id, codegen_out['code'], {
-                        'column_headers': codegen_out.get('column_headers', column_headers),
-                        'format_key': accumulator.format_key,
-                        'company': accumulator.invoice_header.get('Exporter', {}).get('Name')
-                                   if isinstance(accumulator.invoice_header.get('Exporter'), dict)
-                                   else accumulator.invoice_header.get('Exporter'),
-                    })
-                    logger.info(f"[CODEGEN] Saved template: {template_id}")
-                else:
-                    logger.warning(f"[CODEGEN] Generated code failed validation, not saving")
-            else:
-                logger.info(f"[CODEGEN] Invoice not structured enough for codegen")
-        except Exception as e:
-            logger.warning(f"[CODEGEN] Code generation failed: {e}")
+    # ─── PRE-REVIEW EVALUATION ────────────────────────────
+    pre_eval = evaluate_extraction(parsed, items, source_text)
+    if not pre_eval.passed:
+        logger.warning(f"[EVAL] Chunk {chunk_index} failed pre-review checks: {[i['detail'] for i in pre_eval.issues]}")
 
     for i, item in enumerate(items, 1):
         item['_chunk_index'] = chunk_index
@@ -853,6 +851,23 @@ def review_chunk(chunk_index: int) -> str:
         )
 
     retries = accumulator.chunk_retry_count.get(chunk_index, 0)
+
+    # If template extraction failed review, invalidate the template
+    if not passed and accumulator.chunk_model_used.get(chunk_index) == 'template':
+        tkey = accumulator.format_key if accumulator.format_key != "unknown" else None
+        if not tkey and accumulator.vector_match and accumulator.vector_match is not False:
+            tkey = accumulator.vector_match["entry"].format_id
+        if tkey:
+            logger.warning(f"[TEMPLATE] Invalidating template {tkey} — failed review (score={score})")
+            template_registry.entries.pop(tkey, None)
+            template_registry._save()
+        accumulator.chunk_model_used[chunk_index] = None
+        accumulator.chunk_extractions.pop(chunk_index, None)
+        accumulator.processed_indices.discard(chunk_index)
+        return (
+            f"Chunk {chunk_index} FAILED review — template regex produced bad results (score={score}). "
+            f"Template invalidated. Call extract_chunk({chunk_index}) again to use LLM extraction."
+        )
 
     # Soft pass for scanned/vision docs: more lenient since OCR is inherently noisy
     missing_items = [i for i in critical_issues if i.get('type') == 'MISSING_ITEM']
@@ -1203,6 +1218,18 @@ def deduplicate() -> str:
         'fuzzy_groups': fuzzy_groups[:10],
     }
 
+    # ─── DEDUP EVALUATION ────────────────────────────────
+    expected = None
+    for v in accumulator.review_summary.values():
+        if v.get('expected') and v['expected'] != '?':
+            try:
+                expected = (expected or 0) + int(v['expected'])
+            except (ValueError, TypeError):
+                pass
+    dedup_eval = evaluate_dedup(len(all_items), len(after_fuzzy), expected)
+    if not dedup_eval.passed:
+        logger.warning(f"[EVAL] Dedup quality check: {[i['detail'] for i in dedup_eval.issues]}")
+
     if accumulator.tracer:
         accumulator.tracer.step(
             'deduplicate',
@@ -1268,6 +1295,14 @@ def verify_final() -> str:
     if classification and not is_invoice:
         issues.append(f"Document classified as: {classification} (not invoice)")
 
+    # ─── BUSINESS RULES + MATH EVALUATION ────────────────
+    biz_eval = evaluate_business_rules(accumulator.invoice_header or {}, items)
+    math_eval = evaluate_math_consistency(items)
+    for ev in [biz_eval, math_eval]:
+        for issue in ev.issues:
+            if issue['severity'] in ('CRITICAL', 'WARNING'):
+                issues.append(f"[{ev.step}] {issue['check']}: {issue['detail']}")
+
     passed = len(issues) == 0 or (
         len(unprocessed) == 0 and len(unreviewed) == 0
     )
@@ -1312,6 +1347,61 @@ def verify_final() -> str:
                     vector_store.sync_to_s3(bucket, prefix="formats/")
         except Exception as e:
             logger.warning(f"[VECTOR] Save failed (non-blocking): {e}")
+
+    # ─── CODEGEN: generate regex template in background ──
+    if passed and avg_score >= 0.85:
+        has_text_source = any(
+            not t.startswith("[scanned PDF")
+            for t in accumulator.chunk_source_texts.values()
+        )
+        template_key = accumulator.format_key if accumulator.format_key != "unknown" else None
+        if not template_key and accumulator.vector_match and accumulator.vector_match is not False:
+            template_key = accumulator.vector_match["entry"].format_id
+        if has_text_source and template_key and not template_registry.lookup(template_key):
+            all_text = "\n\n".join(
+                t for t in accumulator.chunk_source_texts.values()
+                if t and not t.startswith("[scanned PDF")
+            )
+            ctx = accumulator.vector_match["entry"].extraction_context if (
+                accumulator.vector_match and accumulator.vector_match is not False
+            ) else {}
+            col_order = ctx.get("column_order", []) if ctx else []
+            golden_result = dict(accumulator.invoice_header or {})
+            golden_result["LineItems"] = list(items)
+            fmt_key = accumulator.format_key
+            company = (accumulator.invoice_header or {}).get("Exporter", {}).get("Name") if isinstance((accumulator.invoice_header or {}).get("Exporter"), dict) else None
+
+            import threading
+            def _bg_codegen():
+                try:
+                    codegen_result = generate_extractor_from_golden(
+                        sample_text=all_text,
+                        column_headers=col_order,
+                        format_key=template_key,
+                        extraction_result=golden_result,
+                    )
+                    if codegen_result.get("structured") and codegen_result.get("code"):
+                        test_result = run_extractor(codegen_result["code"], all_text)
+                        if test_result.get("success") and test_result.get("LineItems"):
+                            cg_eval = evaluate_codegen_output(golden_result["LineItems"], test_result["LineItems"])
+                            logger.info(f"[CODEGEN] Field-level eval: {cg_eval.summary()}")
+                            if cg_eval.passed and cg_eval.score >= 0.7:
+                                template_registry.save(template_key, codegen_result["code"], {
+                                    "column_headers": codegen_result.get("column_headers", col_order),
+                                    "format_key": fmt_key,
+                                    "company": company,
+                                })
+                                logger.info(f"[CODEGEN] Template saved: {template_key} (field_accuracy={cg_eval.score:.2f})")
+                                bucket = os.environ.get("S3_BUCKET")
+                                if bucket:
+                                    template_registry.sync_to_s3(bucket, prefix="templates/")
+                            else:
+                                logger.info(f"[CODEGEN] Template rejected: field_accuracy={cg_eval.score:.2f}")
+                except Exception as e:
+                    logger.warning(f"[CODEGEN] Background template generation failed: {e}")
+
+            threading.Thread(target=_bg_codegen, daemon=True).start()
+            logger.info(f"[CODEGEN] Background template generation started for {template_key}")
 
     report = (
         f"{'PASS' if passed else 'FAIL'}: Final Verification Report\n"
