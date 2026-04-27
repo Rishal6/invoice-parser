@@ -279,37 +279,42 @@ class PatternLibrary:
     def add_pattern(self, pattern: Dict) -> str:
         """
         Add a new pattern to the library.
+        Merges with existing if similar pattern_id prefix exists.
         Returns the pattern_id.
         """
-        # Ensure required fields
         pattern_id = pattern.get('pattern_id')
         if not pattern_id:
-            # Generate an id from description
             desc = pattern.get('description', 'unknown')
             pattern_id = desc[:40].lower().replace(' ', '_').replace('-', '_')
             pattern_id = re.sub(r'[^a-z0-9_]', '', pattern_id)
             pattern['pattern_id'] = pattern_id
 
-        # Set defaults for tracking fields
+        # Worker corrections start above the 0.3 matching threshold
         pattern.setdefault('format', None)
         pattern.setdefault('company', None)
         pattern.setdefault('description', '')
         pattern.setdefault('error_context', '')
         pattern.setdefault('fix_prompt', '')
         pattern.setdefault('affected_fields', [])
-        pattern.setdefault('confidence', 0.2)
+        pattern.setdefault('confidence', 0.35)
         pattern.setdefault('times_used', 1)
         pattern.setdefault('times_worked', 0)
         pattern.setdefault('success_rate', 0.0)
         pattern.setdefault('created_at', int(time.time()))
         pattern.setdefault('source', 'human_feedback')
 
-        # Check for duplicate pattern_id
-        existing_ids = {p['pattern_id'] for p in self.patterns}
-        if pattern_id in existing_ids:
-            # Append timestamp to make unique
-            pattern_id = f"{pattern_id}_{int(time.time())}"
-            pattern['pattern_id'] = pattern_id
+        # Merge with existing similar pattern instead of duplicating
+        for existing in self.patterns:
+            eid = existing['pattern_id']
+            if eid == pattern_id or eid.startswith(pattern_id) or pattern_id.startswith(eid.split('_1')[0]):
+                existing['times_used'] = existing.get('times_used', 0) + 1
+                if pattern.get('fix_prompt'):
+                    existing['fix_prompt'] = pattern['fix_prompt']
+                existing['confidence'] = max(existing.get('confidence', 0), 0.35)
+                existing['updated_at'] = int(time.time())
+                self._save()
+                logger.info(f"Merged into existing pattern: {eid} (confidence={existing['confidence']})")
+                return eid
 
         self.patterns.append(pattern)
         self._save()
