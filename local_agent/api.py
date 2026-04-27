@@ -716,6 +716,14 @@ def _save_upload(file: UploadFile) -> tuple[str, str, str]:
     with open(pdf_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
     output_path = str(RESULT_DIR / f"{job_id}.json")
+    # Persist PDF to S3 so worker can view source after container restart
+    try:
+        import storage
+        with open(pdf_path, "rb") as f:
+            storage.put_blob(f"uploads/{job_id}{ext}", f.read())
+        logger.info(f"PDF saved to storage: uploads/{job_id}{ext}")
+    except Exception as e:
+        logger.warning(f"PDF storage save failed (non-blocking): {e}")
     return job_id, pdf_path, output_path
 
 
@@ -1594,13 +1602,25 @@ async def verify_data(job_id: str):
 
     agent_result = v.get('agent_result', {})
 
-    # Find PDF file
+    # Find PDF file — local first, fall back to S3
     pdf_url = None
     for ext in ('.pdf', '.PDF'):
         pdf_path = UPLOAD_DIR / f"{job_id}{ext}"
         if pdf_path.exists():
             pdf_url = f"/uploads/{job_id}{ext}"
             break
+    if not pdf_url:
+        # Try to restore from S3
+        import storage
+        for ext in ('.pdf', '.PDF'):
+            blob_key = f"uploads/{job_id}{ext}"
+            data = storage.get_blob(blob_key)
+            if data:
+                local_path = UPLOAD_DIR / f"{job_id}{ext}"
+                local_path.write_bytes(data)
+                pdf_url = f"/uploads/{job_id}{ext}"
+                logger.info(f"PDF restored from storage: {blob_key}")
+                break
 
     # Build human-readable issues for worker from tool_log
     worker_alerts = []
