@@ -86,6 +86,7 @@ class ExtractionAccumulator:
     format_confidence: float = 0.0
     kb_context: str = ""
     matched_patterns: List[Dict] = field(default_factory=list)
+    last_review_issues: Dict[int, List[Dict]] = field(default_factory=dict)
     vector_match: Any = None
     vector_layout_desc: str = ""
     tracer: Any = None
@@ -835,6 +836,7 @@ def review_chunk(chunk_index: int) -> str:
         accumulator.scores.append(score)
 
     accumulator.reviewed_indices.add(chunk_index)
+    accumulator.last_review_issues[chunk_index] = issues
     accumulator.review_summary[f'chunk_{chunk_index}'] = {
         'passed': passed, 'score': score,
         'expected': expected, 'extracted': extracted,
@@ -843,11 +845,16 @@ def review_chunk(chunk_index: int) -> str:
 
     if accumulator.tracer:
         status = "PASSED" if passed else f"FAILED ({len(critical_issues)} critical)"
+        issue_log = [
+            f"{i.get('type','?')}: {i.get('description','')} → fix: {i.get('fixInstruction','')}"
+            for i in critical_issues[:5]
+        ]
         accumulator.tracer.step(
             'review_chunk', chunk=chunk_index,
             result=f"{status} score={score} ({extracted}/{expected} items)",
             tokens_in=result['input_tokens'], tokens_out=result.get('output_tokens', 0),
-            extra={'passed': passed, 'score': score, 'critical': len(critical_issues)},
+            extra={'passed': passed, 'score': score, 'critical': len(critical_issues),
+                   'issues': issue_log},
         )
 
     retries = accumulator.chunk_retry_count.get(chunk_index, 0)
@@ -948,6 +955,26 @@ def re_extract(chunk_index: int, fix_instructions: str) -> str:
     is_vision = source_text.startswith("[scanned PDF")
     model_id = accumulator.chunk_model_used.get(chunk_index, EXTRACT_MODEL_PRIMARY)
 
+    # Build structured issue details from stored review (not agent's summary)
+    stored_issues = accumulator.last_review_issues.get(chunk_index, [])
+    structured_issues = ""
+    if stored_issues:
+        issue_lines = []
+        for i in stored_issues:
+            if i.get('severity') in ('CRITICAL', 'WARNING'):
+                line = f"- [{i.get('type','?')}] {i.get('description','')}"
+                if i.get('affectedItem'):
+                    line += f" | Item: {i['affectedItem']}"
+                if i.get('expected'):
+                    line += f" | Expected: {i['expected']}"
+                if i.get('actual'):
+                    line += f" | Got: {i['actual']}"
+                if i.get('fixInstruction'):
+                    line += f"\n  FIX: {i['fixInstruction']}"
+                issue_lines.append(line)
+        if issue_lines:
+            structured_issues = "STRUCTURED ISSUES FROM REVIEWER:\n" + "\n".join(issue_lines) + "\n"
+
     # Inject matched pattern fix prompts if available
     pattern_section = ""
     if accumulator.matched_patterns:
@@ -968,7 +995,8 @@ def re_extract(chunk_index: int, fix_instructions: str) -> str:
         text_block = {"text": (
             f"{RE_EXTRACT_PROMPT}\n\n"
             f"EXISTING EXTRACTION (first 5 items for reference):\n{existing_json}\n\n"
-            f"REVIEWER ISSUES:\n{fix_instructions}\n"
+            f"{structured_issues}"
+            f"AGENT INSTRUCTIONS:\n{fix_instructions}\n"
             f"{pattern_section}{kb_section}{ocr_section}\n"
             f"Find and return the missing/corrected items."
         )}
@@ -982,7 +1010,8 @@ def re_extract(chunk_index: int, fix_instructions: str) -> str:
                 f"{RE_EXTRACT_PROMPT}\n\n"
                 f"SOURCE TEXT:\n{'='*40}\n{source_text}\n{'='*40}\n\n"
                 f"EXISTING EXTRACTION (first 5 items for reference):\n{existing_json}\n\n"
-                f"REVIEWER ISSUES:\n{fix_instructions}\n"
+                f"{structured_issues}"
+                f"AGENT INSTRUCTIONS:\n{fix_instructions}\n"
                 f"{pattern_section}{kb_section}\n"
                 f"Find and return the missing/corrected items."
             )
@@ -1303,14 +1332,15 @@ def verify_final() -> str:
             if issue['severity'] in ('CRITICAL', 'WARNING'):
                 issues.append(f"[{ev.step}] {issue['check']}: {issue['detail']}")
 
-    passed = len(issues) == 0 or (
-        len(unprocessed) == 0 and len(unreviewed) == 0
-    )
-
     avg_score = (
         sum(accumulator.scores) / len(accumulator.scores)
         if accumulator.scores else 0
     )
+
+    if avg_score < 0.7 and len(items) > 0:
+        issues.append(f"Average quality score {avg_score:.2f} below threshold 0.70")
+
+    passed = len(issues) == 0 and len(unprocessed) == 0 and len(unreviewed) == 0
 
     if accumulator.tracer:
         accumulator.tracer.step(
