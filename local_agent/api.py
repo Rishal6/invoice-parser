@@ -183,9 +183,12 @@ VIEWER_HTML = """<!DOCTYPE html>
 <style>
   *{margin:0;padding:0;box-sizing:border-box}
   body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#f5f7fa;color:#1a1a2e}
-  .header{background:linear-gradient(135deg,#232f3e 0%,#1a1a2e 100%);color:#fff;padding:24px 32px}
+  .header{background:linear-gradient(135deg,#232f3e 0%,#1a1a2e 100%);color:#fff;padding:24px 32px;display:flex;justify-content:space-between;align-items:center}
   .header h1{font-size:22px;font-weight:600}
   .header p{font-size:13px;color:#a0aec0;margin-top:4px}
+  .header-nav{display:flex;gap:12px}
+  .header-nav a{color:#ff9900;text-decoration:none;font-size:14px;font-weight:600;padding:6px 14px;border:1px solid #ff9900;border-radius:6px;transition:all .2s}
+  .header-nav a:hover{background:#ff9900;color:#fff}
   .controls{display:flex;gap:12px;align-items:center;padding:20px 32px;background:#fff;border-bottom:1px solid #e2e8f0;flex-wrap:wrap}
   .controls input,.controls select{padding:10px 14px;border:1px solid #cbd5e0;border-radius:8px;font-size:14px}
   .controls input[type="text"]{flex:1;min-width:200px}
@@ -241,8 +244,14 @@ VIEWER_HTML = """<!DOCTYPE html>
 <body>
 
 <div class="header">
-  <h1>Invoice Parser</h1>
-  <p>Agentic extraction — upload a PDF, LLM extracts + reviews + deduplicates</p>
+  <div>
+    <h1>Invoice Parser</h1>
+    <p>Agentic extraction — upload a PDF, LLM extracts + reviews + deduplicates</p>
+  </div>
+  <div class="header-nav">
+    <a href="/verify/ui/dashboard">Worker Dashboard</a>
+    <a href="/docs">API Docs</a>
+  </div>
 </div>
 
 <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
