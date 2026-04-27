@@ -1181,14 +1181,19 @@ async function loadData() {
     const label = lvl === 'auto_approve' ? 'Auto Approve' : lvl === 'quick_review' ? 'Quick Review' : 'Full Review';
     document.getElementById('reviewBadge').innerHTML = '<span class="badge ' + cls + '">' + label + '</span>';
 
-    // Show agent issues if any
-    const issues = (data.agent_issues || []).concat(data.trace_issues || []);
-    if (issues.length > 0) {
+    // Show agent issues for worker
+    const alerts = data.worker_alerts || [];
+    if (alerts.length > 0) {
       const panel = document.getElementById('agentIssuesPanel');
       panel.style.display = 'block';
-      document.getElementById('agentIssuesList').innerHTML = issues.map(
-        i => '<div style="padding:4px 0;border-bottom:1px solid #fde68a">' + i + '</div>'
-      ).join('');
+      document.getElementById('agentIssuesList').innerHTML = alerts.map(function(a) {
+        var icon = '⚠️';
+        if (a.indexOf('WRONG_VALUE') >= 0) icon = '🔧';
+        else if (a.indexOf('MISSING') >= 0) icon = '❌';
+        else if (a.indexOf('CLASSIFICATION') >= 0) icon = '📄';
+        else if (a.indexOf('quality') >= 0 || a.indexOf('Quality') >= 0) icon = '📊';
+        return '<div style="padding:6px 0;border-bottom:1px solid #fde68a;line-height:1.5">' + icon + ' ' + a + '</div>';
+      }).join('');
     }
   } catch(e) {
     document.getElementById('editPanel').innerHTML =
@@ -1597,24 +1602,39 @@ async def verify_data(job_id: str):
             pdf_url = f"/uploads/{job_id}{ext}"
             break
 
-    # Build agent issues summary for worker
-    review_summary = agent_result.get('review_summary', {})
-    agent_issues = []
-    for chunk_key, chunk_info in review_summary.items():
-        if not chunk_info.get('passed'):
-            agent_issues.append(
-                f"{chunk_key}: score {chunk_info.get('score', '?')}, "
-                f"{chunk_info.get('critical', 0)} critical, "
-                f"{chunk_info.get('warnings', 0)} warnings"
-            )
+    # Build human-readable issues for worker from tool_log
+    worker_alerts = []
+    tool_log = agent_result.get('tool_log', [])
+    seen_issues = set()
+    for step in tool_log:
+        if step.get('tool') == 'review_chunk' and step.get('issues'):
+            for issue_text in step['issues']:
+                if issue_text not in seen_issues:
+                    seen_issues.add(issue_text)
+                    worker_alerts.append(issue_text)
 
-    # Get trace issues if available
-    trace_issues = []
-    if job_id in jobs and hasattr(jobs[job_id], 'result') and jobs[job_id].result:
-        tool_log = agent_result.get('tool_log', [])
-        for step in tool_log:
-            if step.get('tool') == 'review_chunk' and step.get('issues'):
-                trace_issues.extend(step['issues'])
+    # Fallback: if no detailed issues in trace, build from review_summary
+    if not worker_alerts:
+        review_summary = agent_result.get('review_summary', {})
+        for chunk_key, chunk_info in review_summary.items():
+            if not chunk_info.get('passed'):
+                score = chunk_info.get('score', '?')
+                expected = chunk_info.get('expected', '?')
+                extracted = chunk_info.get('extracted', '?')
+                crits = chunk_info.get('critical', 0)
+                page_hint = chunk_key.replace('chunk_', 'Chunk ')
+                if crits > 0:
+                    worker_alerts.append(
+                        f"{page_hint}: {crits} issues found (score {score}). "
+                        f"Expected {expected} items, got {extracted}. Review all items from this section."
+                    )
+
+    # Add overall quality warning
+    quality = agent_result.get('quality_score', 0)
+    if quality and quality < 0.7:
+        worker_alerts.insert(0,
+            f"Overall quality is low ({quality:.0%}). This extraction needs careful review of all fields."
+        )
 
     return {
         'job_id': job_id,
@@ -1623,8 +1643,7 @@ async def verify_data(job_id: str):
         'status': v.get('status', 'pending'),
         'pdf_url': pdf_url,
         'created_at': v.get('created_at'),
-        'agent_issues': agent_issues,
-        'trace_issues': trace_issues[:10],
+        'worker_alerts': worker_alerts[:15],
     }
 
 
