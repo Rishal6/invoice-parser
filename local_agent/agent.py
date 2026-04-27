@@ -74,7 +74,9 @@ PHASE 3 — DEDUP + FINAL
 RULES:
 - PREFER process_all_chunks over manual chunk-by-chunk processing.
 - If process_all_chunks reports a failed chunk, you may manually re_extract it.
-- Never finish without calling verify_final."""
+- Never finish without calling verify_final.
+- Call verify_final ONLY ONCE. After verify_final returns (PASS or FAIL), STOP immediately. Do NOT retry, do NOT call review_chunk or re_extract again. The result goes to worker verification — humans handle the rest.
+- A FAIL result is expected for low-quality scans or unusual formats. That is normal. Report the result and stop."""
 
 
 class CompletenessGuard(HookProvider):
