@@ -150,6 +150,21 @@ app.add_middleware(
 )
 
 
+@app.on_event("startup")
+async def _load_vector_store():
+    """Load FAISS index from S3 on container startup."""
+    bucket = os.environ.get("S3_BUCKET")
+    if not bucket:
+        return
+    try:
+        from vector_store import VectorStore
+        vs = VectorStore()
+        vs.sync_from_s3(bucket, prefix="formats/")
+        logger.info(f"[STARTUP] Vector store loaded from s3://{bucket}/formats/")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Vector store load skipped: {e}")
+
+
 # ─── Viewer HTML ──────────────────────────────────────────
 
 VIEWER_HTML = """<!DOCTYPE html>

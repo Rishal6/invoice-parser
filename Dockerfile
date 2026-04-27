@@ -15,6 +15,7 @@ uvicorn
 pymupdf
 pypdf
 Pillow
+faiss-cpu
 rapidfuzz
 strands-agents
 python-multipart

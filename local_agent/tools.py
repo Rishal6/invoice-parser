@@ -35,6 +35,7 @@ from registry import TemplateRegistry
 from codegen import generate_extractor
 from runner import run_extractor
 from tracer import JobTracer
+from vector_store import VectorStore
 
 logger = logging.getLogger(__name__)
 
@@ -50,10 +51,11 @@ bedrock = boto3.client('bedrock-runtime', region_name=REGION, config=Config(
 CHUNK_DIR = os.path.join(tempfile.gettempdir(), 'invoice_chunks')
 os.makedirs(CHUNK_DIR, exist_ok=True)
 
-# ─── KB + PATTERN + TEMPLATE INSTANCES ───────────────────
+# ─── KB + PATTERN + TEMPLATE + VECTOR STORE INSTANCES ────
 kb = KnowledgeBase()
 pattern_library = PatternLibrary()
 template_registry = TemplateRegistry()
+vector_store = VectorStore()
 
 
 # ─── ACCUMULATOR ───────────────────────────────────────────
@@ -79,6 +81,8 @@ class ExtractionAccumulator:
     format_confidence: float = 0.0
     kb_context: str = ""
     matched_patterns: List[Dict] = field(default_factory=list)
+    vector_match: Any = None
+    vector_layout_desc: str = ""
     tracer: Any = None
 
 
@@ -330,6 +334,19 @@ def _extract_text_from_pdf(pdf_path: str) -> str:
     return "\n\n".join(texts)
 
 
+def _ocr_extract_text(pdf_path: str) -> str:
+    """Extract text from scanned PDF using PyMuPDF's text extraction.
+    Falls back to empty string if no text found."""
+    doc = pymupdf.open(pdf_path)
+    texts = []
+    for page in doc:
+        text = page.get_text("text")
+        if text and text.strip():
+            texts.append(text.strip())
+    doc.close()
+    return "\n\n".join(texts)
+
+
 def _render_pdf_to_images(pdf_path: str, dpi: int = 200) -> list[dict]:
     """Render PDF pages to PNG images for vision-based extraction.
     Returns list of Bedrock Converse image content blocks."""
@@ -461,9 +478,15 @@ def extract_chunk(chunk_index: int) -> str:
     source_text = _extract_text_from_pdf(chunk_path)
     use_vision = len(source_text.strip()) < 50
 
+    ocr_text = ""
     if use_vision:
-        logger.info(f"[TOOL] chunk {chunk_index}: scanned PDF — using vision extraction")
-        source_text = "[scanned PDF — extracted via vision]"
+        ocr_text = _ocr_extract_text(chunk_path)
+        if ocr_text and len(ocr_text.strip()) > 50:
+            logger.info(f"[TOOL] chunk {chunk_index}: scanned PDF — OCR recovered {len(ocr_text)} chars")
+            source_text = f"[scanned PDF — OCR text below]\n{ocr_text}"
+        else:
+            logger.info(f"[TOOL] chunk {chunk_index}: scanned PDF — pure image, no OCR text")
+            source_text = "[scanned PDF — extracted via vision]"
 
     accumulator.chunk_source_texts[chunk_index] = source_text
 
@@ -473,7 +496,7 @@ def extract_chunk(chunk_index: int) -> str:
         if use_vision:
             images_for_detect = _render_pdf_to_images(chunk_path)
         kb_result = kb.detect_and_retrieve(
-            source_text=source_text if not use_vision else None,
+            source_text=ocr_text if (use_vision and ocr_text) else (source_text if not use_vision else None),
             images=images_for_detect,
             invoice_header=accumulator.invoice_header or None,
         )
@@ -481,6 +504,28 @@ def extract_chunk(chunk_index: int) -> str:
         accumulator.format_confidence = kb_result['confidence']
         accumulator.kb_context = kb_result['context']
         logger.info(f"[KB] Format: {kb_result['format_name']} (confidence={kb_result['confidence']:.2f})")
+
+    # ─── VECTOR STORE: search for similar layout ─────────
+    if chunk_index == 0 and accumulator.vector_match is None:
+        try:
+            pdf_for_vector = accumulator.chunk_paths[0] if accumulator.chunk_paths else chunk_path
+            match = vector_store.find_matching_format(pdf_for_vector)
+            if match:
+                accumulator.vector_match = match
+                accumulator.vector_layout_desc = match["layout_description"]
+                logger.info(f"[VECTOR] Match: {match['entry'].format_id} (score={match['score']:.3f})")
+                if accumulator.tracer:
+                    accumulator.tracer.step(
+                        'vector_search', result=f"match={match['entry'].format_id} score={match['score']:.3f}",
+                        extra={'format_id': match['entry'].format_id, 'score': match['score']},
+                    )
+            else:
+                accumulator.vector_match = False
+                if accumulator.tracer:
+                    accumulator.tracer.step('vector_search', result="no match")
+        except Exception as e:
+            logger.warning(f"[VECTOR] Search failed: {e}")
+            accumulator.vector_match = False
 
     # ─── TEMPLATE REGISTRY: check for saved extractor ────
     template_hit = False
@@ -534,10 +579,12 @@ def extract_chunk(chunk_index: int) -> str:
         )
 
     # ─── LLM EXTRACTION (existing path) ─────────────────
-    # Build prompt: base + KB context (only relevant knowledge)
+    # Build prompt: base + KB context + vector context
     prompt = EXTRACTION_PROMPT
     if accumulator.kb_context:
         prompt = f"{EXTRACTION_PROMPT}\n\n{accumulator.kb_context}"
+    if accumulator.vector_match and accumulator.vector_match is not False:
+        prompt = vector_store.build_augmented_prompt(prompt, accumulator.vector_match)
 
     model_id = accumulator.chunk_model_used.get(chunk_index, EXTRACT_MODEL_PRIMARY)
 
@@ -548,7 +595,15 @@ def extract_chunk(chunk_index: int) -> str:
     try:
         if use_vision:
             image_blocks = _render_pdf_to_images(chunk_path)
-            user_content = [{"text": f"{prompt}\n\nExtract all data from this invoice."}] + image_blocks
+            ocr_hint = ""
+            if ocr_text:
+                ocr_hint = (
+                    f"\n\nOCR TEXT (may contain errors — use images as primary source, "
+                    f"OCR as supplementary reference):\n{ocr_text[:3000]}"
+                )
+            user_content = [
+                {"text": f"{prompt}\n\nExtract all data from this invoice.{ocr_hint}"}
+            ] + image_blocks
         else:
             user_content = [{"text": f"{prompt}\n\nINVOICE TEXT:\n{source_text}"}]
 
@@ -573,8 +628,13 @@ def extract_chunk(chunk_index: int) -> str:
         ]
         accumulator.invoice_header = {k: parsed.get(k) for k in header_fields if parsed.get(k) is not None}
 
-    if truncated and chunk_pages >= 1:
-        logger.info(f"[TOOL] chunk {chunk_index}: TRUNCATED — using strip-based extraction ({chunk_pages} pages)")
+    use_strips = truncated and chunk_pages >= 1
+    if use_vision and chunk_pages > 2 and not truncated:
+        use_strips = True
+        logger.info(f"[TOOL] chunk {chunk_index}: scanned PDF with {chunk_pages} pages — proactive strip extraction")
+
+    if use_strips:
+        logger.info(f"[TOOL] chunk {chunk_index}: strip-based extraction ({chunk_pages} pages)")
         items = []
         detected_columns = ""
         for page_idx in range(chunk_pages):
@@ -720,18 +780,26 @@ def review_chunk(chunk_index: int) -> str:
         return f"ERROR: No source text for chunk {chunk_index}. Call extract_chunk first."
 
     extraction_json = json.dumps(extraction, indent=2, default=str)
-    is_vision = source_text == "[scanned PDF — extracted via vision]"
+    is_vision = source_text.startswith("[scanned PDF")
 
     try:
         if is_vision:
             chunk_path = accumulator.chunk_paths[chunk_index]
             image_blocks = _render_pdf_to_images(chunk_path)
+            ocr_section = ""
+            if source_text.startswith("[scanned PDF — OCR text below]"):
+                ocr_content = source_text[len("[scanned PDF — OCR text below]\n"):]
+                ocr_section = (
+                    f"\n\nOCR TEXT (supplementary — may contain errors):\n"
+                    f"{'='*40}\n{ocr_content[:3000]}\n{'='*40}"
+                )
             user_content = [
                 {"text": (
                     f"EXTRACTION ({len(extraction)} items):\n"
                     f"{'='*40}\n{extraction_json}\n{'='*40}\n\n"
                     f"The source PDF pages are attached as images.\n"
                     f"Review this extraction against the images. Find every discrepancy."
+                    f"{ocr_section}"
                 )},
             ] + image_blocks
         else:
@@ -862,7 +930,7 @@ def re_extract(chunk_index: int, fix_instructions: str) -> str:
     existing = accumulator.chunk_extractions.get(chunk_index, [])
     existing_json = json.dumps(existing[:5], indent=2, default=str)
 
-    is_vision = source_text == "[scanned PDF — extracted via vision]"
+    is_vision = source_text.startswith("[scanned PDF")
     model_id = accumulator.chunk_model_used.get(chunk_index, EXTRACT_MODEL_PRIMARY)
 
     # Inject matched pattern fix prompts if available
@@ -875,12 +943,18 @@ def re_extract(chunk_index: int, fix_instructions: str) -> str:
     if accumulator.kb_context:
         kb_section = f"\n\n{accumulator.kb_context}\n"
 
+    # OCR text for scanned PDFs
+    ocr_section = ""
+    if is_vision and source_text.startswith("[scanned PDF — OCR text below]"):
+        ocr_content = source_text[len("[scanned PDF — OCR text below]\n"):]
+        ocr_section = f"\n\nOCR TEXT (reference):\n{ocr_content[:3000]}\n"
+
     try:
         text_block = {"text": (
             f"{RE_EXTRACT_PROMPT}\n\n"
             f"EXISTING EXTRACTION (first 5 items for reference):\n{existing_json}\n\n"
             f"REVIEWER ISSUES:\n{fix_instructions}\n"
-            f"{pattern_section}{kb_section}\n"
+            f"{pattern_section}{kb_section}{ocr_section}\n"
             f"Find and return the missing/corrected items."
         )}
 
@@ -1214,6 +1288,30 @@ def verify_final() -> str:
             quality_score=avg_score,
             passed=passed,
         )
+
+    # ─── VECTOR STORE: save format on success ────────────
+    if passed and avg_score >= 0.8 and accumulator.chunk_paths:
+        try:
+            layout_desc = accumulator.vector_layout_desc
+            if not layout_desc:
+                layout_desc = vector_store.describe_layout(accumulator.chunk_paths[0])
+            final_result = dict(accumulator.invoice_header)
+            final_result["LineItems"] = items
+            job_id = accumulator.tracer.job_id if accumulator.tracer else ""
+            fmt_id = vector_store.save_format(
+                pdf_path=accumulator.chunk_paths[0],
+                layout_description=layout_desc,
+                extraction_result=final_result,
+                quality_score=avg_score,
+                job_id=job_id,
+            )
+            if fmt_id:
+                logger.info(f"[VECTOR] Format saved: {fmt_id}")
+                bucket = os.environ.get("S3_BUCKET")
+                if bucket:
+                    vector_store.sync_to_s3(bucket, prefix="formats/")
+        except Exception as e:
+            logger.warning(f"[VECTOR] Save failed (non-blocking): {e}")
 
     report = (
         f"{'PASS' if passed else 'FAIL'}: Final Verification Report\n"
