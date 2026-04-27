@@ -1094,6 +1094,11 @@ VERIFY_PAGE_HTML = """<!DOCTYPE html>
   <div><div class="accuracy-bar stat-value" id="correctedFieldsVal">-</div><div class="accuracy-bar stat-label">Corrected</div></div>
 </div>
 
+<div id="agentIssuesPanel" style="display:none;margin:0 32px;padding:14px 20px;background:#fff8f0;border:1px solid #f59e0b;border-radius:8px">
+  <div style="font-weight:700;color:#92400e;font-size:13px;margin-bottom:8px">AGENT FLAGGED ISSUES — Check These First</div>
+  <div id="agentIssuesList" style="font-size:13px;color:#78350f"></div>
+</div>
+
 <div class="main-layout">
   <div class="edit-panel" id="editPanel">
     <!-- Header Fields -->
@@ -1175,6 +1180,16 @@ async function loadData() {
     const cls = lvl === 'auto_approve' ? 'badge-green' : lvl === 'quick_review' ? 'badge-yellow' : 'badge-red';
     const label = lvl === 'auto_approve' ? 'Auto Approve' : lvl === 'quick_review' ? 'Quick Review' : 'Full Review';
     document.getElementById('reviewBadge').innerHTML = '<span class="badge ' + cls + '">' + label + '</span>';
+
+    // Show agent issues if any
+    const issues = (data.agent_issues || []).concat(data.trace_issues || []);
+    if (issues.length > 0) {
+      const panel = document.getElementById('agentIssuesPanel');
+      panel.style.display = 'block';
+      document.getElementById('agentIssuesList').innerHTML = issues.map(
+        i => '<div style="padding:4px 0;border-bottom:1px solid #fde68a">' + i + '</div>'
+      ).join('');
+    }
   } catch(e) {
     document.getElementById('editPanel').innerHTML =
       '<div style="text-align:center;padding:80px;color:#e53e3e"><h2>Failed to load</h2><p>' + e.message + '</p><p style="margin-top:12px"><a href="/verify/ui/dashboard">Back to Dashboard</a></p></div>';
@@ -1582,6 +1597,25 @@ async def verify_data(job_id: str):
             pdf_url = f"/uploads/{job_id}{ext}"
             break
 
+    # Build agent issues summary for worker
+    review_summary = agent_result.get('review_summary', {})
+    agent_issues = []
+    for chunk_key, chunk_info in review_summary.items():
+        if not chunk_info.get('passed'):
+            agent_issues.append(
+                f"{chunk_key}: score {chunk_info.get('score', '?')}, "
+                f"{chunk_info.get('critical', 0)} critical, "
+                f"{chunk_info.get('warnings', 0)} warnings"
+            )
+
+    # Get trace issues if available
+    trace_issues = []
+    if job_id in jobs and hasattr(jobs[job_id], 'result') and jobs[job_id].result:
+        tool_log = agent_result.get('tool_log', [])
+        for step in tool_log:
+            if step.get('tool') == 'review_chunk' and step.get('issues'):
+                trace_issues.extend(step['issues'])
+
     return {
         'job_id': job_id,
         'agent_result': agent_result,
@@ -1589,6 +1623,8 @@ async def verify_data(job_id: str):
         'status': v.get('status', 'pending'),
         'pdf_url': pdf_url,
         'created_at': v.get('created_at'),
+        'agent_issues': agent_issues,
+        'trace_issues': trace_issues[:10],
     }
 
 
@@ -1699,10 +1735,16 @@ async def submit_verification(job_id: str, worker_result: Dict, worker_id: str =
 @app.post("/feedback/{job_id}")
 async def submit_feedback(job_id: str, text: str):
     """Submit plain text feedback from worker."""
-    if job_id not in jobs or not jobs[job_id].result:
+    agent_result = None
+    if job_id in jobs and jobs[job_id].result:
+        agent_result = jobs[job_id].result.model_dump()
+    else:
+        v = verification_mgr.get_verification(job_id)
+        if v:
+            agent_result = v.get('agent_result')
+    if not agent_result:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    agent_result = jobs[job_id].result.model_dump()
     result = feedback_proc.process_plain_text_feedback(
         job_id=job_id,
         text=text,
