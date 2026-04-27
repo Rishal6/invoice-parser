@@ -1094,11 +1094,11 @@ VERIFY_PAGE_HTML = """<!DOCTYPE html>
 <div class="accuracy-bar" id="accuracyBar">
   <div class="accuracy-ring" id="accuracyRing">
     <svg width="52" height="52"><circle cx="26" cy="26" r="22" fill="none" stroke="#e2e8f0" stroke-width="4"/><circle id="ringCircle" cx="26" cy="26" r="22" fill="none" stroke="#38a169" stroke-width="4" stroke-dasharray="138.2" stroke-dashoffset="0" stroke-linecap="round"/></svg>
-    <div class="pct" id="ringPct">100%</div>
+    <div class="pct" id="ringPct">-</div>
   </div>
-  <div><div class="accuracy-bar stat-value" id="accValue">100%</div><div class="accuracy-bar stat-label">Accuracy</div></div>
+  <div><div class="accuracy-bar stat-value" id="accValue">-</div><div class="accuracy-bar stat-label" id="accLabel">AI Quality</div></div>
   <div><div class="accuracy-bar stat-value" id="totalFieldsVal">-</div><div class="accuracy-bar stat-label">Total Fields</div></div>
-  <div><div class="accuracy-bar stat-value" id="correctFieldsVal">-</div><div class="accuracy-bar stat-label">Correct</div></div>
+  <div><div class="accuracy-bar stat-value" id="correctFieldsVal">-</div><div class="accuracy-bar stat-label">Unchanged</div></div>
   <div><div class="accuracy-bar stat-value" id="correctedFieldsVal">-</div><div class="accuracy-bar stat-label">Corrected</div></div>
 </div>
 
@@ -1188,6 +1188,19 @@ async function loadData() {
     const cls = lvl === 'auto_approve' ? 'badge-green' : lvl === 'quick_review' ? 'badge-yellow' : 'badge-red';
     const label = lvl === 'auto_approve' ? 'Auto Approve' : lvl === 'quick_review' ? 'Quick Review' : 'Full Review';
     document.getElementById('reviewBadge').innerHTML = '<span class="badge ' + cls + '">' + label + '</span>';
+
+    // Show AI quality score (not accuracy — accuracy is computed after worker submits)
+    const qs = agentResult.quality_score || 0;
+    const qPct = Math.round(qs * 100);
+    document.getElementById('ringPct').textContent = qPct + '%';
+    document.getElementById('accValue').textContent = qPct + '%';
+    document.getElementById('accLabel').textContent = 'AI Quality';
+    const circumference = 138.2;
+    document.getElementById('ringCircle').setAttribute('stroke-dashoffset', circumference * (1 - qs));
+    document.getElementById('ringCircle').setAttribute('stroke', qPct >= 80 ? '#38a169' : qPct >= 50 ? '#d69e2e' : '#e53e3e');
+    document.getElementById('totalFieldsVal').textContent = '-';
+    document.getElementById('correctFieldsVal').textContent = '-';
+    document.getElementById('correctedFieldsVal').textContent = '0';
 
     // Show agent issues for worker
     const alerts = data.worker_alerts || [];
@@ -1439,13 +1452,18 @@ function updateAccuracy() {
   const circumference = 2 * Math.PI * 22;
   const offset = circumference * (1 - pct / 100);
 
-  document.getElementById('ringPct').textContent = pct + '%';
-  document.getElementById('ringCircle').setAttribute('stroke-dashoffset', offset);
-  document.getElementById('ringCircle').setAttribute('stroke', pct >= 90 ? '#38a169' : pct >= 70 ? '#d69e2e' : '#e53e3e');
-  document.getElementById('accValue').textContent = pct + '%';
+  const corrected = total - correct;
+  // Switch from "AI Quality" to "Worker Accuracy" once worker starts editing
+  if (corrected > 0) {
+    document.getElementById('accLabel').textContent = 'Worker Accuracy';
+    document.getElementById('ringPct').textContent = pct + '%';
+    document.getElementById('ringCircle').setAttribute('stroke-dashoffset', offset);
+    document.getElementById('ringCircle').setAttribute('stroke', pct >= 90 ? '#38a169' : pct >= 70 ? '#d69e2e' : '#e53e3e');
+    document.getElementById('accValue').textContent = pct + '%';
+  }
   document.getElementById('totalFieldsVal').textContent = total;
   document.getElementById('correctFieldsVal').textContent = correct;
-  document.getElementById('correctedFieldsVal').textContent = total - correct;
+  document.getElementById('correctedFieldsVal').textContent = corrected;
 }
 
 // ── PDF viewer ─────────────────────────────────────────
