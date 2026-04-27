@@ -151,8 +151,8 @@ app.add_middleware(
 
 
 @app.on_event("startup")
-async def _load_vector_store():
-    """Load FAISS index from S3 on container startup."""
+async def _load_stores_from_s3():
+    """Load FAISS index + template registry from S3 on container startup."""
     bucket = os.environ.get("S3_BUCKET")
     if not bucket:
         return
@@ -163,6 +163,13 @@ async def _load_vector_store():
         logger.info(f"[STARTUP] Vector store loaded from s3://{bucket}/formats/")
     except Exception as e:
         logger.warning(f"[STARTUP] Vector store load skipped: {e}")
+    try:
+        from registry import TemplateRegistry
+        tr = TemplateRegistry()
+        tr.sync_from_s3(bucket, prefix="templates/")
+        logger.info(f"[STARTUP] Template registry loaded from s3://{bucket}/templates/")
+    except Exception as e:
+        logger.warning(f"[STARTUP] Template registry load skipped: {e}")
 
 
 # ─── Viewer HTML ──────────────────────────────────────────

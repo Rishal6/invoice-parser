@@ -305,7 +305,7 @@ class VectorStore:
             thumb_bytes = self.render_thumbnail(pdf_path)
             thumb_path = self._thumb_dir() / f"{format_id}.png"
             thumb_path.write_bytes(thumb_bytes)
-            thumb_key = str(thumb_path)
+            thumb_key = f"thumbnails/{format_id}.png"
         except Exception as e:
             logger.warning(f"[VECTOR] Thumbnail save failed: {e}")
 

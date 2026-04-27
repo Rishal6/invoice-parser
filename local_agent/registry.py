@@ -107,3 +107,35 @@ class TemplateRegistry:
     def list_templates(self) -> list:
         """List all saved templates with metadata."""
         return list(self.entries.values())
+
+    def sync_to_s3(self, bucket: str, prefix: str = "templates/"):
+        """Upload registry + code files to S3."""
+        import boto3
+        try:
+            s3 = boto3.client("s3")
+            s3.upload_file(str(self.registry_file), bucket, f"{prefix}registry.json")
+            for tid in self.entries:
+                code_path = self.registry_dir / f"{tid}.py"
+                if code_path.exists():
+                    s3.upload_file(str(code_path), bucket, f"{prefix}{tid}.py")
+            logger.info(f"[TEMPLATE] Synced {len(self.entries)} templates to s3://{bucket}/{prefix}")
+        except Exception as e:
+            logger.error(f"[TEMPLATE] S3 sync failed: {e}")
+
+    def sync_from_s3(self, bucket: str, prefix: str = "templates/"):
+        """Download registry + code files from S3 on startup."""
+        import boto3
+        try:
+            s3 = boto3.client("s3")
+            self.registry_dir.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, f"{prefix}registry.json", str(self.registry_file))
+            self._load()
+            for tid in self.entries:
+                code_path = self.registry_dir / f"{tid}.py"
+                try:
+                    s3.download_file(bucket, f"{prefix}{tid}.py", str(code_path))
+                except Exception:
+                    logger.warning(f"[TEMPLATE] Code file not found in S3: {tid}.py")
+            logger.info(f"[TEMPLATE] Loaded {len(self.entries)} templates from s3://{bucket}/{prefix}")
+        except Exception as e:
+            logger.warning(f"[TEMPLATE] S3 load failed (starting fresh): {e}")
